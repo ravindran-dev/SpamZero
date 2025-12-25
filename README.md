@@ -1,4 +1,4 @@
-# Spam Detection Web Application
+# SpamZero - Spam Detection Web Application
 
 A full-stack Machine Learning web application that detects spam messages and emails using Natural Language Processing (NLP) and a Supervised ML pipeline, deployed professionally with React.js + Flask.
 
