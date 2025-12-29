@@ -3,53 +3,69 @@ from flask_cors import CORS
 import os
 import pickle
 import logging
+import base64
+from email.mime.text import MIMEText
+
 import joblib
-import yagmail
-from dotenv import load_dotenv
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
+# ================= APP SETUP =================
 app = Flask(__name__)
 CORS(app)
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-# Load model and vectorizer
+# ================= LOAD MODEL =================
 model = joblib.load("spam_model.pkl")
 vectorizer = joblib.load("vectorizer.pkl")
+logging.info("✅ Model and vectorizer loaded")
 
-# Gmail API scope
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-
-# Email credentials
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-SENDER_PASS = os.getenv("SENDER_PASS")
+# ================= GMAIL API SCOPES =================
+# IMPORTANT: BOTH scopes are required
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send'
+]
 
 def authenticate_gmail():
     creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
+    if os.path.exists("token.pickle"):
+        with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "credentials.json", SCOPES
+            )
             creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
+
+        with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
-    return build('gmail', 'v1', credentials=creds)
 
-def send_email(to, subject, body):
-    try:
-        yag = yagmail.SMTP(SENDER_EMAIL, SENDER_PASS)
-        yag.send(to=to, subject=subject, contents=body)
-        print(f"✅ Email sent to {to}")
-    except Exception as e:
-        print(f"❌ Email failed: {e}")
+    return build("gmail", "v1", credentials=creds)
 
-# ========== Route: Predict single message ==========
+# ================= SEND EMAIL (GMAIL API) =================
+def send_email(service, to_email, subject, body):
+    message = MIMEText(body)
+    message["to"] = to_email
+    message["subject"] = subject
+
+    raw_message = base64.urlsafe_b64encode(
+        message.as_bytes()
+    ).decode()
+
+    service.users().messages().send(
+        userId="me",
+        body={"raw": raw_message}
+    ).execute()
+
+    logging.info(f"📤 Report email sent to {to_email}")
+
+# ================= PREDICT SINGLE MESSAGE =================
 @app.route("/predict", methods=["POST"])
 def predict():
     data = request.get_json()
@@ -57,14 +73,15 @@ def predict():
     text = data.get("text", "").strip()[:1000]
 
     if not email or not text:
-        return jsonify({"error": "Email and message text are required."}), 400
+        return jsonify({"error": "Email and message text required"}), 400
 
-    vec_input = vectorizer.transform([text])
-    prediction = model.predict(vec_input)[0]
+    vec = vectorizer.transform([text])
+    prediction = model.predict(vec)[0]
     label = "SPAM" if prediction == 1 else "Not Spam"
 
-    # Send email
-    subject = "Spam Scanner - Message Prediction"
+    service = authenticate_gmail()
+
+    subject = "Spam Scanner - Message Result"
     body = f"""
 Hi,
 
@@ -74,83 +91,95 @@ You submitted the following message:
 
 Prediction: {label}
 
-Thank you for using Spam Scanner.
+Thanks,
+Spam Scanner
 """
-    send_email(email, subject, body)
 
-    return jsonify({"email": email, "prediction": int(prediction), "label": label})
+    send_email(service, email, subject, body)
 
+    return jsonify({
+        "email": email,
+        "prediction": int(prediction),
+        "label": label
+    })
 
-# ========== Route: Scan Gmail inbox ==========
+# ================= SCAN GMAIL INBOX =================
 @app.route("/scan-inbox", methods=["POST"])
 def scan_inbox():
     data = request.get_json()
     email = data.get("email", "").strip()
+
     if not email:
-        return jsonify({"error": "Email address is required."}), 400
+        return jsonify({"error": "Email address required"}), 400
 
     try:
         service = authenticate_gmail()
-        results = service.users().messages().list(userId='me', maxResults=10).execute()
-        messages = results.get('messages', [])
 
-        if not messages:
-            return jsonify({"message": "No messages found."})
+        results = service.users().messages().list(
+            userId="me",
+            maxResults=10
+        ).execute()
 
-        spam_count = 0
-        details = []
+        messages = results.get("messages", [])
         spam_details = []
 
         for msg in messages:
-            msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-            snippet = msg_data.get('snippet', '').strip()[:1000]
+            msg_data = service.users().messages().get(
+                userId="me",
+                id=msg["id"],
+                format="full"
+            ).execute()
+
+            snippet = msg_data.get("snippet", "")[:1000]
             headers = msg_data.get("payload", {}).get("headers", [])
-            from_header = next((h["value"] for h in headers if h["name"] == "From"), "Unknown")
+
+            sender = next(
+                (h["value"] for h in headers if h["name"] == "From"),
+                "Unknown"
+            )
 
             vec = vectorizer.transform([snippet])
             prediction = model.predict(vec)[0]
-            label = "SPAM" if prediction == 1 else "Not Spam"
-
-            detail = {
-                "from": from_header,
-                "message": snippet,
-                "prediction": int(prediction),
-                "label": label
-            }
-            details.append(detail)
 
             if prediction == 1:
-                spam_count += 1
-                spam_details.append(detail)
+                spam_details.append({
+                    "from": sender,
+                    "message": snippet,
+                    "label": "SPAM"
+                })
 
-        # Prepare email body with spam messages only
+        spam_count = len(spam_details)
+
         spam_text = "\n\n".join(
-            [f"From: {msg['from']}\nMessage: {msg['message']}" for msg in spam_details]
+            [f"From: {m['from']}\nMessage: {m['message']}" for m in spam_details]
         )
+
         subject = "Spam Scanner - Gmail Inbox Report"
-        body = f"""Hi,
+        body = f"""
+Hi,
 
 We scanned your latest 10 Gmail messages.
-Spam detected: {spam_count} message(s).
 
-Details:
-{spam_text if spam_count > 0 else "No spam found."}
+Spam detected: {spam_count}
 
-Thank you for using Spam Scanner.
+{spam_text if spam_count > 0 else "No spam messages found."}
+
+Thanks,
+Spam Scanner
 """
-        send_email(email, subject, body)
+
+        send_email(service, email, subject, body)
 
         return jsonify({
             "email": email,
-            "total_checked": len(details),
             "spam_detected": spam_count,
-            "details": spam_details  # Only spam shown
+            "details": spam_details
         })
 
     except Exception as e:
-        print(f"❌ Gmail scan failed: {e}")
+        logging.error(f"❌ Inbox scan failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-
+# ================= MAIN =================
 if __name__ == "__main__":
     app.run(debug=True)
