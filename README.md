@@ -206,6 +206,9 @@ Message: Apply now for high-paying jobs...
 - Cloud deployment (AWS / Render)
 
 - Deep learning models (LSTM / Transformers)
+## Screenshot
+<img width="1864" height="969" alt="image" src="https://github.com/user-attachments/assets/78e010d0-5727-4d59-97fc-67004272097f" />
+
 
 ##  Author - **Ravindran S**
 
