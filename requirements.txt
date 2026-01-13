@@ -1,4 +1,12 @@
 flask
 flask-cors
-scikit-learn
+python-dotenv
+scikit-learn==1.6.1
 joblib
+numpy
+google-api-python-client
+google-auth
+google-auth-oauthlib
+yagmail
+keyring
+gunicorn
